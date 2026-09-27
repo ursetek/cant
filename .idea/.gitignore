@@ -1,0 +1,23 @@
+# User-specific stuff
+workspace.xml
+tasks.xml
+usage.statistics.xml
+dictionaries/
+shelf/
+
+# Generated files
+contentModel.xml
+
+# Sensitive or high-churn files
+dataSources/
+dataSources.local.xml
+sqlDataSources.xml
+dynamic.xml
+uiDesigner.xml
+dbnavigator.xml
+
+# Plugin data
+mongoSettings.xml
+atlassian-ide-plugin.xml
+sonarlint/
+httpRequests/

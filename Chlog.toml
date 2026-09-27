@@ -1,0 +1,35 @@
+# Chlog configuration for cargo-chlog.
+# Used by the release workflow to generate release notes from Conventional
+# Commits.
+
+[commits.types]
+feat = "Features"
+fix = "Fixes"
+docs = "Documentation"
+style = "Style"
+refactor = "Refactoring"
+perf = "Performance"
+test = "Tests"
+chore = "Chore"
+build = "Build"
+ci = "CI"
+spec = "Specification"
+
+[log]
+# Include commit URLs in changelog.
+include_commit_url = false
+# Include commit hashes in changelog.
+include_commit_hash = false
+# Separate change lists by scope using subheadings.
+separate_scope_lists = false
+# Collect and display contributors/thanks.
+collect_thanks = true
+# Thanks list subtitle text.
+thanks_subtitle = "Authors"
+
+# Ignore commits that are not user-facing.
+[[commits.ignore]]
+brief.regex = '[Bb]ump version.*?'
+
+[[commits.ignore]]
+brief.prefix = 'HIDDEN:'

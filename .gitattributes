@@ -1,0 +1,11 @@
+* text=auto eol=lf
+
+*.rs text eol=lf
+*.toml text eol=lf
+
+*.png binary
+*.jpg binary
+*.woff binary
+*.woff2 binary
+
+Cargo.lock -merge linguist-generated=false

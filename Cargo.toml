@@ -1,0 +1,8 @@
+[package]
+name = "cant"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "ECS"
+
+[dependencies]

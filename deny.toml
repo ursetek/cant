@@ -8,6 +8,7 @@ unmaintained = "workspace"
 ignore = []
 
 [licenses]
+unused-allowed-license = "allow"
 version = 2
 allow = [
     "MIT",

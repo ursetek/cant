@@ -28,3 +28,7 @@ commit: check
 
 bench:
     @cargo bench
+
+pub:
+    @cargo publish -p cant-macros
+    @cargo publish -p cant

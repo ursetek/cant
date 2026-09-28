@@ -1,0 +1,13 @@
+.idea
+.vscode
+.zed
+target
+.editorconfig
+.gitattributes
+.gitignore
+.ignore
+.mailmap
+.rustfmt.toml
+.vimrc
+Cargo.lock
+Chlog.toml

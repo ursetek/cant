@@ -19,12 +19,19 @@ pub const DEFAULT_PARALLEL_THRESHOLD: usize = 32;
 
 /// Default cost budget, in nanoseconds.
 ///
-/// Empirically, the parallel pipeline (`rayon::par_iter` plus command-buffer
-/// collection) costs ~16 µs on a warm pool, independent of the batch size.
-/// A batch should only run in parallel when its summed hint amortizes that
-/// overhead with room to spare; a 30× ratio is a reasonable starting point.
-/// Systems whose total hint is below this budget run sequentially.
-pub const DEFAULT_PARALLEL_BUDGET_NS: u64 = 1_000_000;
+/// Measured overhead of the parallel path on a warm rayon pool is ~20 µs
+/// per batch, roughly constant across batch sizes (dominated by
+/// work-stealing wakeup and buffer plumbing, not by `thread::spawn`).
+/// Breakeven against sequential dispatch therefore lands around 30–50 µs
+/// of summed work. This default gives a ~5× margin above that breakeven,
+/// leaving room for scheduling latency and cache warming on workers, while
+/// still parallelizing the medium-weight systems (tens of microseconds
+/// each) that dominate real frame budgets.
+///
+/// Lower the value for latency-sensitive workloads that want to parallelize
+/// even small batches; raise it (up to `u64::MAX`) to disable cost-based
+/// parallelization entirely.
+pub const DEFAULT_PARALLEL_BUDGET_NS: u64 = 100_000;
 
 /// Wrapper around a raw pointer that crosses thread boundaries inside rayon.
 ///

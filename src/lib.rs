@@ -53,3 +53,30 @@ pub use query::{
 pub use schedule::Schedule;
 pub use system::{AccessList, FnSystem, QuerySystem, System};
 pub use world::{ResourceError, World};
+
+// ---------------------------------------------------------------------------
+// Component trait (for #[derive(Component)])
+// ---------------------------------------------------------------------------
+
+/// Marker trait for types registered as ECS components.
+///
+/// Implement this via `#[derive(Component)]`. The `NAME` constant is used by
+/// [`World::register`] to give the component a stable, human-readable name
+/// in diagnostics.
+pub trait Component: Send + Sync + 'static {
+    /// Stable, human-readable name.
+    const NAME: &'static str;
+}
+
+impl World {
+    /// Registers a component by its derived name.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`MAX_COMPONENTS`] is reached.
+    pub fn register<T: Component>(&mut self) -> ComponentId {
+        self.register_component::<T>(T::NAME)
+    }
+}
+
+pub use cant_macros::{Component as ComponentDerive, system};

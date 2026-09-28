@@ -12,4 +12,4 @@ Cargo.lock
 *.swo
 *~
 
-!.ignore
+.ignore

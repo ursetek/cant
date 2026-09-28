@@ -1,67 +1,39 @@
-//! Scheduler throughput: parallel batches of independent systems.
+//! Scheduler benchmarks.
+//!
+//! Two orthogonal things are measured here:
+//!
+//! 1. **Batch construction** — how the greedy batcher groups systems by
+//!    `AccessList`. This is a build-time cost; it runs once per schedule.
+//! 2. **Pipeline overhead** — the per-batch cost of dispatching systems
+//!    through the sequential versus parallel path. Workloads are trivial
+//!    (empty closures) so the numbers reflect pipeline cost alone, not
+//!    system work.
+//!
+//! Absolute throughput of real systems is intentionally not measured here:
+//! it depends on the workload and drifts with thermal state, making
+//! cross-run comparison unreliable. Use `tests/` for correctness and query
+//! benchmarks for hot-loop throughput.
 
 #![allow(missing_docs)]
 
-mod common;
-
 use std::hint::black_box;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use criterion::{
     BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main,
 };
 
 use cant::{Access, AccessList, ComponentId, FnSystem, Schedule, World};
-use cant::{QueryMask, QuerySystem};
 
-use crate::common::Position;
+// ---------------------------------------------------------------------------
+// Sequential batches: N systems, each in its own batch.
+// ---------------------------------------------------------------------------
 
-/// N independent systems, each touching a distinct synthetic component.
-/// They all land in one batch and run in parallel.
-fn bench_parallel_batch(c: &mut Criterion) {
-    let mut group = c.benchmark_group("schedule_parallel");
-    for &n_systems in &[2u32, 4, 8, 16] {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n_systems),
-            &n_systems,
-            |b, &n_systems| {
-                b.iter_batched(
-                    || {
-                        let counter = Arc::new(AtomicU64::new(0));
-                        let mut schedule = Schedule::new();
-                        for i in 0..n_systems {
-                            let c = Arc::clone(&counter);
-                            let mut access = AccessList::new();
-                            access.add_component(
-                                ComponentId::from_raw(i),
-                                Access::Write,
-                            );
-                            schedule.add_system(FnSystem::new(
-                                format!("s{i}"),
-                                access,
-                                move |_, _| {
-                                    c.fetch_add(1, Ordering::Relaxed);
-                                },
-                            ));
-                        }
-                        (schedule, World::new(), counter)
-                    },
-                    |(mut schedule, mut world, counter)| {
-                        schedule.run(&mut world);
-                        black_box(counter.load(Ordering::Relaxed))
-                    },
-                    BatchSize::SmallInput,
-                );
-            },
-        );
-    }
-    group.finish();
-}
-
-/// N systems all writing the same component; they serialize into N batches.
+/// N systems, all writing the same component. The batcher cannot place any
+/// two of them in a batch together, so the schedule has exactly N batches
+/// of one system each. Measures sequential dispatch cost.
 fn bench_sequential_batches(c: &mut Criterion) {
     let mut group = c.benchmark_group("schedule_sequential");
+
     for &n_systems in &[2u32, 4, 8, 16] {
         group.bench_with_input(
             BenchmarkId::from_parameter(n_systems),
@@ -69,10 +41,8 @@ fn bench_sequential_batches(c: &mut Criterion) {
             |b, &n_systems| {
                 b.iter_batched(
                     || {
-                        let counter = Arc::new(AtomicU64::new(0));
                         let mut schedule = Schedule::new();
                         for i in 0..n_systems {
-                            let c = Arc::clone(&counter);
                             let mut access = AccessList::new();
                             access.add_component(
                                 ComponentId::from_raw(0),
@@ -81,16 +51,14 @@ fn bench_sequential_batches(c: &mut Criterion) {
                             schedule.add_system(FnSystem::new(
                                 format!("s{i}"),
                                 access,
-                                move |_, _| {
-                                    c.fetch_add(1, Ordering::Relaxed);
-                                },
+                                |_, _| {},
                             ));
                         }
-                        (schedule, World::new(), counter)
+                        (schedule, World::new())
                     },
-                    |(mut schedule, mut world, counter)| {
+                    |(mut schedule, mut world)| {
                         schedule.run(&mut world);
-                        black_box(counter.load(Ordering::Relaxed))
+                        black_box(schedule.batch_count())
                     },
                     BatchSize::SmallInput,
                 );
@@ -100,9 +68,17 @@ fn bench_sequential_batches(c: &mut Criterion) {
     group.finish();
 }
 
-/// Schedule rebuild cost as a function of system count.
+// ---------------------------------------------------------------------------
+// Schedule build cost.
+// ---------------------------------------------------------------------------
+
+/// Cost of `Schedule::build` as a function of system count.
+///
+/// Systems are spread across a small set of distinct components so the
+/// batcher has actual work to do (it cannot put all of them in one batch).
 fn bench_schedule_build(c: &mut Criterion) {
     let mut group = c.benchmark_group("schedule_build");
+
     for &n_systems in &[8u32, 32, 128] {
         group.bench_with_input(
             BenchmarkId::from_parameter(n_systems),
@@ -113,8 +89,8 @@ fn bench_schedule_build(c: &mut Criterion) {
                         let mut schedule = Schedule::new();
                         for i in 0..n_systems {
                             let mut access = AccessList::new();
-                            // Spread across 4 distinct components so batching
-                            // has actual work to do.
+                            // Four distinct components → up to four
+                            // systems per batch.
                             access.add_component(
                                 ComponentId::from_raw(i % 4),
                                 Access::Write,
@@ -139,73 +115,81 @@ fn bench_schedule_build(c: &mut Criterion) {
     group.finish();
 }
 
-/// N read-only query systems over a shared world.
+// ---------------------------------------------------------------------------
+// Pipeline overhead: parallel vs sequential dispatch on trivial systems.
+// ---------------------------------------------------------------------------
+
+/// Force a batch through the parallel path, regardless of its size.
 ///
-/// Two workloads: `light` (10k entities per system, ~7 µs of work) and
-/// `heavy` (500k entities per system, ~350 µs of work). Each workload is
-/// run with the hint set to the system's real cost (calibrated below) and
-/// with hint zero (falls back to the size threshold).
-fn bench_parallel_calibrated(c: &mut Criterion) {
-    let mut group = c.benchmark_group("schedule_parallel_calibrated");
-    group.sample_size(100);
+/// Systems are trivial (they do nothing), so the measured cost is the
+/// pipeline itself: `thread::scope` setup, one `pthread_create` per worker
+/// minus one, buffer collection, join, command-buffer application. No
+/// component data is touched, so thermal effects do not contaminate the
+/// numbers.
+///
+/// The `seq` column runs the same systems through the sequential path by
+/// setting the budget out of reach. Comparing the two at the same `n`
+/// isolates the parallel pipeline cost.
+fn bench_pipeline_overhead(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pipeline_overhead");
+    group.sample_size(500);
 
-    // (workload_label, entities, hint_ns)
-    let configs: &[(&str, u32, u32)] =
-        &[("light", 10_000, 7_000), ("heavy", 500_000, 350_000)];
+    for &n_systems in &[2usize, 4, 8, 16, 32] {
+        for &mode in &["seq", "par"] {
+            let id = format!("n{n_systems}_{mode}");
 
-    for &(label, entities, hint_ns) in configs {
-        for &n_systems in &[2u32, 4, 8] {
-            for hint in [0u32, hint_ns] {
-                let h_label = if hint == 0 { "nohint" } else { "hint" };
-                let id = format!("{label}_n{n_systems}_{h_label}");
+            group.bench_with_input(
+                BenchmarkId::from_parameter(&id),
+                &n_systems,
+                |b, &n_systems| {
+                    b.iter_batched(
+                        || {
+                            let mut schedule = Schedule::new();
+                            for i in 0..n_systems {
+                                let mut access = AccessList::new();
+                                // Distinct component per system: no
+                                // conflicts, so all systems land in one
+                                // batch.
+                                #[allow(clippy::cast_possible_truncation)]
+                                access.add_component(
+                                    ComponentId::from_raw(i as u32),
+                                    Access::Write,
+                                );
+                                // Non-zero hint so the decision is driven
+                                // by `budget_ns`, not by the size
+                                // threshold.
+                                access.set_cost_hint_ns(1);
+                                schedule.add_system(FnSystem::new(
+                                    format!("s{i}"),
+                                    access,
+                                    |_, _| {
+                                        // Trivial body. `black_box` keeps
+                                        // the closure from being optimized
+                                        // out entirely.
+                                        black_box(0u64);
+                                    },
+                                ));
+                            }
 
-                group.bench_with_input(
-                    BenchmarkId::from_parameter(&id),
-                    &n_systems,
-                    |b, &n_systems| {
-                        b.iter_batched(
-                            || {
-                                let world = common::world_with_motion(entities);
-                                let pos =
-                                    world.component_id::<Position>().unwrap();
-                                let mut schedule = Schedule::new();
-                                for _ in 0..n_systems {
-                                    let mut mask = QueryMask::new();
-                                    mask.read(pos);
-                                    let query = world.prepare(mask).unwrap();
-                                    let sys = QuerySystem::new(
-                                        "read",
-                                        query,
-                                        |view| {
-                                            let ps = view
-                                                .column::<Position>(0)
-                                                .unwrap();
-                                            let mut s = 0.0f32;
-                                            for p in ps {
-                                                s += p.0;
-                                            }
-                                            black_box(s);
-                                        },
-                                    );
-                                    let sys = if hint == 0 {
-                                        sys
-                                    } else {
-                                        sys.with_cost_hint_ns(hint)
-                                    };
-                                    schedule.add_system(sys);
-                                }
-                                schedule.build();
-                                (schedule, world)
-                            },
-                            |(mut schedule, mut world)| {
-                                schedule.run(&mut world);
-                                black_box(schedule.batch_count())
-                            },
-                            BatchSize::LargeInput,
-                        );
-                    },
-                );
-            }
+                            if mode == "par" {
+                                // Any non-zero hint ≥ 0 → parallel.
+                                schedule.set_parallel_budget_ns(0);
+                            } else {
+                                // No hint can reach `u64::MAX` → sequential.
+                                schedule.set_parallel_budget_ns(u64::MAX);
+                            }
+                            schedule.build();
+
+                            (schedule, World::new())
+                        },
+                        |(mut schedule, mut world)| {
+                            schedule.run(&mut world);
+                            black_box(schedule.batch_count())
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
         }
     }
     group.finish();
@@ -213,9 +197,8 @@ fn bench_parallel_calibrated(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_parallel_batch,
     bench_sequential_batches,
     bench_schedule_build,
-    bench_parallel_calibrated,
+    bench_pipeline_overhead,
 );
 criterion_main!(benches);

@@ -1,0 +1,15 @@
+[package]
+name = "cant-macros"
+version = "0.0.2"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Procedural macros for cant"
+repository = "https://github.com/ursetek/cant"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "3", features = ["full", "extra-traits", "parsing", "printing"] }
+quote = "1"
+proc-macro2 = "1"

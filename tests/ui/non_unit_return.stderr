@@ -1,0 +1,5 @@
+error: system functions must return `()`
+ --> tests/ui/non_unit_return.rs:7:33
+  |
+7 | fn bad(_positions: &[Position]) -> u32 {
+  |                                 ^^^^^^

@@ -1,0 +1,5 @@
+error: binding `x` is declared more than once
+ --> tests/ui/duplicate_binding.rs:8:10
+  |
+8 | #[locals(x: f32)]
+  |          ^

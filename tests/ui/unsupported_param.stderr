@@ -1,0 +1,5 @@
+error: system parameters must be `&[Entity]`, `&[T]`, or `&mut [T]`
+ --> tests/ui/unsupported_param.rs:7:20
+  |
+7 | fn bad(_positions: Vec<Position>) {
+  |                    ^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: `&mut [Entity]` is not allowed; use `&[Entity]`
+ --> tests/ui/mutable_entities.rs:9:18
+  |
+9 | fn bad(entities: &mut [Entity]) {
+  |                  ^^^^^^^^^^^^^

@@ -32,7 +32,7 @@ struct LocalDecl {
 struct SystemInput {
     docs: Vec<Attribute>,
     system_name: Ident,
-    hint_ns: Option<u64>,
+    hint_ns: Option<u32>,
     resources: Vec<ResourceDecl>,
     locals: Vec<LocalDecl>,
     commands_binding: Option<Ident>,
@@ -41,7 +41,7 @@ struct SystemInput {
 
 /// Parser for the combined `#[system(...)]` argument list.
 struct CombinedArgs {
-    hint_ns: Option<u64>,
+    hint_ns: Option<u32>,
     resources: Vec<ResourceDecl>,
     locals: Vec<LocalDecl>,
     commands: Option<Option<Ident>>,
@@ -140,12 +140,12 @@ fn parse_resource_list(
     out: &mut Vec<ResourceDecl>,
 ) -> syn::Result<()> {
     while !input.is_empty() {
+        let name: Ident = input.parse()?;
+        input.parse::<Token![:]>()?;
         let mutable = input.peek(Token![mut]);
         if mutable {
             input.parse::<Token![mut]>()?;
         }
-        let name: Ident = input.parse()?;
-        input.parse::<Token![:]>()?;
         let ty: Type = input.parse()?;
         out.push(ResourceDecl { name, ty, mutable });
         if input.peek(Token![,]) {
@@ -216,7 +216,7 @@ fn normalize(
     combined: Option<CombinedArgs>,
     fn_item: ItemFn,
 ) -> syn::Result<SystemInput> {
-    let mut hint_ns = None;
+    let mut hint_ns: Option<u32> = None;
     let mut resources = Vec::new();
     let mut locals = Vec::new();
     let mut commands_binding = None;
@@ -657,12 +657,14 @@ fn generate(input: SystemInput) -> syn::Result<TokenStream> {
 
     let user_body = &fn_item.block;
 
-    let run_body = if components.is_empty() {
+    let run_body = if params.is_empty() {
+        // No chunk-level parameters: run the body once per frame.
         quote! {
             #(#prologue)*
             #user_body
         }
     } else {
+        // At least one `&[Entity]` or component slice: iterate chunks.
         quote! {
             #(#prologue)*
             // SAFETY: the access list declared above is exactly the

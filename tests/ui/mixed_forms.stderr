@@ -1,0 +1,7 @@
+error: cannot mix `#[system(...)]` with separate `#[hint]` / `#[resources]` / `#[locals]` / `#[commands]` attributes
+ --> tests/ui/mixed_forms.rs:6:1
+  |
+6 | #[cant::system(hint(1000))]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `cant::system` (in Nightly builds, run with -Z macro-backtrace for more info)

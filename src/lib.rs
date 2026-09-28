@@ -79,4 +79,4 @@ impl World {
     }
 }
 
-pub use cant_macros::{Component as ComponentDerive, system};
+pub use cant_macros::{Component, system};

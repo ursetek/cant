@@ -25,6 +25,7 @@ clippy.all = "warn"
 clippy.pedantic = "warn"
 
 [dev-dependencies]
+trybuild = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

@@ -2,7 +2,6 @@
 
 use core::any::TypeId;
 
-use crate::archetype::Archetype;
 use crate::bundle::Bundle;
 use crate::{ArchetypeId, BundleId, ComponentMask, Entity, Location};
 
@@ -103,38 +102,20 @@ impl World {
         bid: BundleId,
         bundle: B,
     ) -> Entity {
-        let entity = self.entities.alloc();
-        self.spawn_bundle_reserved_id(bid, entity, bundle);
-        entity
-    }
+        let archetype = self.bundles[bid.index()].archetype;
+        let row = self.archetypes[archetype_index(archetype)].len();
+        let entity = self
+            .entities
+            .alloc_with_location(Location { archetype, row });
 
-    /// Places a reserved entity and writes the bundle's components from a
-    /// typed bundle value.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `bid` was not produced by [`Self::register_bundle`].
-    pub(crate) fn spawn_bundle_reserved_id<B: Bundle>(
-        &mut self,
-        bid: BundleId,
-        entity: Entity,
-        bundle: B,
-    ) {
-        let bundles = &self.bundles;
-        let desc = &bundles[bid.index()];
-        let archetype = desc.archetype;
-        let slots = &desc.slots;
-
-        let archetypes = &mut self.archetypes;
-        let arch: &mut Archetype = &mut archetypes[archetype_index(archetype)];
-
-        let row = arch.push_with(entity, |arch, row| {
+        let slots = &self.bundles[bid.index()].slots;
+        let arch = &mut self.archetypes[archetype_index(archetype)];
+        arch.push_with(entity, |arch, row| {
             // SAFETY: `row` is freshly reserved; `slots` was computed for
             // this bundle against this archetype.
             unsafe { bundle.write_into(arch, row, slots) };
         });
-        self.entities
-            .set_location(entity, Location { archetype, row });
+        entity
     }
 
     /// Places a reserved entity and writes the bundle's components from an

@@ -51,6 +51,11 @@ pub struct Archetype {
     entities: Vec<Entity>,
     /// Rows per chunk, identical for every storage.
     chunk_capacity: u32,
+    /// Parallel to `storages`: `needs_drop[i]` is
+    /// `storages[i].info().needs_drop()`. Precomputed so the hot
+    /// `swap_remove` loop can skip destructor calls without an indirect
+    /// lookup.
+    needs_drop: Box<[bool]>,
 }
 
 impl Archetype {
@@ -92,6 +97,9 @@ impl Archetype {
             s.init_capacity(chunk_capacity);
         }
 
+        let needs_drop: Box<[bool]> =
+            storages.iter().map(|s| s.info().needs_drop()).collect();
+
         Self {
             id,
             mask,
@@ -99,6 +107,7 @@ impl Archetype {
             storages: storages.into_boxed_slice(),
             entities: Vec::new(),
             chunk_capacity,
+            needs_drop,
         }
     }
 
@@ -294,12 +303,16 @@ impl Archetype {
         let removed = self.entities[row_usize];
 
         let moved = if row_usize == last {
-            // Dropping the tail row: destroy all components in place.
+            // Tail removal: destroy the row's components in place.
             let chunk = self.chunk_of(row);
             let row_in_chunk = self.row_in_chunk(row);
-            for s in &mut self.storages {
-                // SAFETY: row < len, so the slot is initialized.
-                unsafe { s.drop_raw(chunk, row_in_chunk) };
+            for (s, &need) in
+                self.storages.iter_mut().zip(self.needs_drop.iter())
+            {
+                if need {
+                    // SAFETY: row < len, so the slot is initialized.
+                    unsafe { s.drop_raw(chunk, row_in_chunk) };
+                }
             }
             None
         } else {
@@ -308,14 +321,16 @@ impl Archetype {
             let src_row = self.row_in_chunk(src);
             let dst_chunk = self.chunk_of(row);
             let dst_row = self.row_in_chunk(row);
-            for s in &mut self.storages {
-                // SAFETY: dst is initialized (row < len) and src is
-                // initialized (last < len); we drop dst, then move src into
-                // it. After this, src is logically uninitialized.
-                unsafe {
-                    s.drop_raw(dst_chunk, dst_row);
-                    s.move_raw(src_chunk, src_row, dst_chunk, dst_row);
+            for (s, &need) in
+                self.storages.iter_mut().zip(self.needs_drop.iter())
+            {
+                if need {
+                    // SAFETY: dst is initialized (row < len).
+                    unsafe { s.drop_raw(dst_chunk, dst_row) };
                 }
+                // SAFETY: src is initialized (last < len), dst is now
+                // uninitialized. The move is a bitwise copy.
+                unsafe { s.move_raw(src_chunk, src_row, dst_chunk, dst_row) };
             }
             let moved_entity = self.entities[last];
             self.entities[row_usize] = moved_entity;
@@ -325,9 +340,9 @@ impl Archetype {
         self.entities.pop();
         let new_len = u32::try_from(self.entities.len()).expect("row overflow");
         for s in &mut self.storages {
-            // SAFETY: the removed slot was dropped and, if applicable, the
-            // last slot was moved into its place. The prefix `[0, new_len)`
-            // is fully initialized.
+            // SAFETY: the removed slot was dropped (or skipped as a
+            // no-drop), and, if applicable, the last slot was moved into
+            // its place. The prefix `[0, new_len)` is fully initialized.
             unsafe { s.set_len(new_len) };
         }
 
@@ -344,6 +359,31 @@ impl Archetype {
     pub(crate) fn entity_at(&self, row: u32) -> Entity {
         debug_assert!(row < self.len(), "row out of bounds");
         self.entities[row as usize]
+    }
+
+    /// Reserves capacity for at least `additional` more rows in this
+    /// archetype.
+    ///
+    /// Grows underlying chunk storage eagerly instead of amortized per row.
+    /// Useful when a known batch of entities is about to be spawned into
+    /// the archetype.
+    pub(crate) fn reserve(&mut self, additional: u32) {
+        let current = self.entities.len();
+        let needed = current + additional as usize;
+        let cap = self.chunk_capacity as usize;
+        let chunks_needed = needed.div_ceil(cap);
+        let chunks_have = if current == 0 {
+            0
+        } else {
+            current.div_ceil(cap)
+        };
+        if chunks_needed > chunks_have {
+            let n = u32::try_from(chunks_needed).expect("chunk count overflow");
+            for s in &mut self.storages {
+                s.grow_to(n);
+            }
+        }
+        self.entities.reserve(additional as usize);
     }
 
     /// Reserves a new row for `entity` and returns its index.

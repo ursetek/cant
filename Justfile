@@ -8,11 +8,11 @@ fmt-check:
     @cargo fmt --all -- --check
 
 lint:
-    @cargo clippy --all-targets --all-features -- -D warnings
-    @cargo clippy --all-targets --all-features --profile=test -- -D warnings
+    @cargo clippy -- -D warnings
+    @cargo clippy --profile=test -- -D warnings
 
 test:
-    @cargo test --all-features --all-targets -- --no-capture
+    @cargo test -- --no-capture
 
 deny:
     @cargo deny check
@@ -25,3 +25,6 @@ clean:
 commit: check
     @git add -A
     @git commit
+
+bench:
+    @cargo bench

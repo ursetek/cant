@@ -21,6 +21,7 @@ pub struct AccessList {
     components: Vec<(ComponentId, Access)>,
     resources: Vec<(ResourceId, Access)>,
     structural_write: bool,
+    cost_hint_ns: u32,
 }
 
 impl AccessList {
@@ -28,6 +29,22 @@ impl AccessList {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the estimated cost of this system, in nanoseconds.
+    ///
+    /// Zero (the default) means "no hint"; the scheduler then falls back to
+    /// the batch-size threshold. A non-zero hint participates in the
+    /// cost-based decision.
+    pub fn set_cost_hint_ns(&mut self, ns: u32) -> &mut Self {
+        self.cost_hint_ns = ns;
+        self
+    }
+
+    /// Returns the cost hint, in nanoseconds.
+    #[must_use]
+    pub fn cost_hint_ns(&self) -> u32 {
+        self.cost_hint_ns
     }
 
     /// Declares access to component `id`.
@@ -83,6 +100,7 @@ impl AccessList {
             components: query.mask().access().to_vec(),
             resources: Vec::new(),
             structural_write: false,
+            ..Default::default()
         }
     }
 
@@ -239,6 +257,19 @@ where
     #[must_use]
     pub fn query(&self) -> &Query {
         &self.query
+    }
+}
+
+impl<F> QuerySystem<F>
+where
+    F: FnMut(ChunkView<'_>) + Send + Sync + 'static,
+{
+    /// Sets the system's cost hint in nanoseconds; see
+    /// [`AccessList::set_cost_hint_ns`].
+    #[must_use]
+    pub fn with_cost_hint_ns(mut self, ns: u32) -> Self {
+        self.access.set_cost_hint_ns(ns);
+        self
     }
 }
 

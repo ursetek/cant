@@ -9,6 +9,23 @@ use crate::query::UnsafeWorldCell;
 use crate::system::System;
 use crate::{Commands, SystemId, World};
 
+/// Default fallback minimum batch size for the parallel path, applied only
+/// when no system in the batch provides a cost hint.
+///
+/// Chosen so that batches of trivial systems (no hint, tens of nanoseconds
+/// of work each) stay on the sequential path. Applications with heavier
+/// systems should use cost hints instead.
+pub const DEFAULT_PARALLEL_THRESHOLD: usize = 32;
+
+/// Default cost budget, in nanoseconds.
+///
+/// Empirically, the parallel pipeline (`rayon::par_iter` plus command-buffer
+/// collection) costs ~16 µs on a warm pool, independent of the batch size.
+/// A batch should only run in parallel when its summed hint amortizes that
+/// overhead with room to spare; a 30× ratio is a reasonable starting point.
+/// Systems whose total hint is below this budget run sequentially.
+pub const DEFAULT_PARALLEL_BUDGET_NS: u64 = 500_000;
+
 /// Wrapper around a raw pointer that crosses thread boundaries inside rayon.
 ///
 /// # Safety
@@ -43,6 +60,9 @@ pub struct Schedule {
     systems: Vec<Box<dyn System>>,
     batches: Vec<Vec<usize>>,
     built: bool,
+    parallel_threshold: usize,
+    batch_costs_ns: Vec<u64>,
+    parallel_budget_ns: u64,
 }
 
 impl Schedule {
@@ -52,8 +72,60 @@ impl Schedule {
         Self {
             systems: Vec::new(),
             batches: Vec::new(),
+            batch_costs_ns: Vec::new(),
             built: false,
+            parallel_threshold: DEFAULT_PARALLEL_THRESHOLD,
+            parallel_budget_ns: DEFAULT_PARALLEL_BUDGET_NS,
         }
+    }
+
+    /// Sets the fallback minimum batch size for the parallel path.
+    ///
+    /// Applies only when no system in the batch provided a cost hint.
+    pub fn set_parallel_threshold(&mut self, threshold: usize) {
+        self.parallel_threshold = threshold;
+    }
+
+    /// Sets the cost budget, in nanoseconds.
+    ///
+    /// A batch whose summed hint is `>= budget` runs in parallel. Defaults
+    /// to [`DEFAULT_PARALLEL_BUDGET_NS`], which accounts for the empirical
+    /// ~16 µs overhead of the parallel pipeline on a warm rayon pool.
+    ///
+    /// Lowering the budget lets small but expensive systems parallelize;
+    /// raising it keeps everything sequential. Setting `u64::MAX` disables
+    /// cost-based parallelization.
+    pub fn set_parallel_budget_ns(&mut self, budget_ns: u64) {
+        self.parallel_budget_ns = budget_ns;
+    }
+
+    /// Returns the current parallel threshold.
+    #[must_use]
+    pub fn parallel_threshold(&self) -> usize {
+        self.parallel_threshold
+    }
+
+    /// Returns the current cost budget.
+    #[must_use]
+    pub fn parallel_budget_ns(&self) -> u64 {
+        self.parallel_budget_ns
+    }
+
+    /// Recomputes the batch ordering.
+    pub fn build(&mut self) {
+        self.batches = compute_batches(&self.systems);
+        self.batch_costs_ns = self
+            .batches
+            .iter()
+            .map(|b| {
+                b.iter()
+                    .map(|&i| {
+                        u64::from(self.systems[i].access().cost_hint_ns())
+                    })
+                    .sum()
+            })
+            .collect();
+        self.built = true;
     }
 
     /// Adds a system, returning its dense identifier.
@@ -71,12 +143,6 @@ impl Schedule {
         id
     }
 
-    /// Recomputes the batch ordering.
-    pub fn build(&mut self) {
-        self.batches = compute_batches(&self.systems);
-        self.built = true;
-    }
-
     /// Runs every system in the schedule, once, in batch order.
     ///
     /// Systems within a batch run in parallel; batches themselves run
@@ -92,47 +158,86 @@ impl Schedule {
         let sys = SendPtr(systems_ptr);
         let raw = SendPtr(core::ptr::from_mut(world));
 
-        for batch in &self.batches {
+        for (batch_idx, batch) in self.batches.iter().enumerate() {
             if batch.is_empty() {
                 continue;
             }
+
             if batch.len() == 1 {
+                // Single-system batch: spawning permitted. Always
+                // sequential.
                 let idx = batch[0];
                 debug_assert!(idx < systems_len);
-                // SAFETY: idx < systems_len; no other reference to this system.
+                // SAFETY: idx < systems_len.
                 let system = unsafe { &mut *sys.get().add(idx) };
                 // SAFETY: unique access to world; structural writes allowed.
                 let cell = unsafe { UnsafeWorldCell::from_raw(raw.get()) };
+                // SAFETY: unique access to world; spawning permitted.
                 let mut commands =
                     unsafe { Commands::from_raw(raw.get(), true) };
                 system.run(cell, &mut commands);
                 commands.apply();
-            } else {
-                // SAFETY: indices in a batch are distinct; systems in a
-                // batch have non-conflicting access lists; spawning is
-                // disabled, so no thread mutates the entity table.
-                let buffers: Vec<(Vec<Command>, Vec<u8>)> = batch
-                    .par_iter()
-                    .map(|&idx| {
-                        debug_assert!(idx < systems_len);
-                        // SAFETY: distinct index per task.
-                        let system = unsafe { &mut *sys.get().add(idx) };
-                        // SAFETY: no conflicting access across threads.
-                        let cell =
-                            unsafe { UnsafeWorldCell::from_raw(raw.get()) };
-                        // SAFETY: spawn disabled.
-                        let mut commands =
-                            unsafe { Commands::from_raw(raw.get(), false) };
-                        system.run(cell, &mut commands);
-                        commands.into_parts()
-                    })
-                    .collect();
+                continue;
+            }
 
-                // Sequential apply in batch order.
+            // Multi-system batch: systems are pairwise non-conflicting by
+            // construction, so no system here is a structural writer and
+            // spawning is disabled for all of them.
+            let batch_cost = self.batch_costs_ns[batch_idx];
+            let use_parallel = should_parallelize(
+                batch.len(),
+                batch_cost,
+                self.parallel_threshold,
+                self.parallel_budget_ns,
+            );
+
+            if !use_parallel {
+                let mut buffers: Vec<(Vec<Command>, Vec<u8>)> =
+                    Vec::with_capacity(batch.len());
+                for &idx in batch {
+                    debug_assert!(idx < systems_len);
+                    // SAFETY: idx < systems_len; sequential iteration.
+                    let system = unsafe { &mut *sys.get().add(idx) };
+                    // SAFETY: no conflicting access across sequential calls.
+                    let cell = unsafe { UnsafeWorldCell::from_raw(raw.get()) };
+                    // SAFETY: spawning disabled for multi-system batches.
+                    let mut local =
+                        unsafe { Commands::from_raw(raw.get(), false) };
+                    system.run(cell, &mut local);
+                    buffers.push(local.into_parts());
+                }
                 for (buffer, arena) in buffers {
-                    // SAFETY: buffers were produced by the enqueue path on
-                    // this same world; `world` is exclusively borrowed here.
-                    unsafe { Commands::apply_parts(world, buffer, &arena) };
+                    // SAFETY: buffers were produced against this world.
+                    unsafe {
+                        Commands::apply_parts(&mut *raw.get(), buffer, &arena);
+                    }
+                }
+                continue;
+            }
+
+            // Parallel path.
+            // SAFETY: indices in a batch are distinct; systems in a batch
+            // have non-conflicting access lists; spawning is disabled.
+            let buffers: Vec<(Vec<Command>, Vec<u8>)> = batch
+                .par_iter()
+                .map(|&idx| {
+                    debug_assert!(idx < systems_len);
+                    // SAFETY: distinct index per task.
+                    let system = unsafe { &mut *sys.get().add(idx) };
+                    // SAFETY: no conflicting access across threads.
+                    let cell = unsafe { UnsafeWorldCell::from_raw(raw.get()) };
+                    // SAFETY: spawning disabled.
+                    let mut commands =
+                        unsafe { Commands::from_raw(raw.get(), false) };
+                    system.run(cell, &mut commands);
+                    commands.into_parts()
+                })
+                .collect();
+
+            for (buffer, arena) in buffers {
+                // SAFETY: buffers were produced against this world.
+                unsafe {
+                    Commands::apply_parts(&mut *raw.get(), buffer, &arena);
                 }
             }
         }
@@ -169,7 +274,30 @@ impl fmt::Debug for Schedule {
             .field("systems", &self.systems.len())
             .field("batches", &self.batches.len())
             .field("built", &self.built)
-            .finish()
+            .field("parallel_threshold", &self.parallel_threshold)
+            .field("parallel_budget_ns", &self.parallel_budget_ns)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Decides whether a multi-system batch runs in parallel.
+///
+/// - If the batch's summed cost hint is non-zero, the batch runs in
+///   parallel only when the hint reaches `budget_ns`.
+/// - Otherwise (no hints), the batch runs in parallel only when its size
+///   reaches `threshold`.
+#[inline]
+fn should_parallelize(
+    len: usize,
+    cost_ns: u64,
+    threshold: usize,
+    budget_ns: u64,
+) -> bool {
+    debug_assert!(len >= 2, "single-system batches bypass this decision");
+    if cost_ns > 0 {
+        cost_ns >= budget_ns
+    } else {
+        len >= threshold
     }
 }
 

@@ -21,3 +21,26 @@ strip = true
 rust.missing_docs = "deny"
 clippy.all = "warn"
 clippy.pedantic = "warn"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "spawn"
+harness = false
+
+[[bench]]
+name = "query"
+harness = false
+
+[[bench]]
+name = "migration"
+harness = false
+
+[[bench]]
+name = "schedule"
+harness = false
+
+[[bench]]
+name = "projection"
+harness = false

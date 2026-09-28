@@ -21,7 +21,7 @@ use crate::archetype::Archetype;
 use crate::component::ComponentInfo;
 use crate::entity::Entities;
 use crate::storage::Storage;
-use crate::{ArchetypeId, ComponentId, ComponentMask, Query, QueryError};
+use crate::{ArchetypeId, ComponentMask, Query, QueryError};
 use crate::{BundleId, QueryMask};
 use core::any::TypeId;
 pub use resources::ResourceError;
@@ -66,8 +66,6 @@ pub struct World {
     pub(crate) component_factories: Vec<StorageFactory>,
     pub(crate) archetypes: Vec<Archetype>,
     pub(crate) archetype_index: FxHashMap<ComponentMask, ArchetypeId>,
-    pub(crate) add_edges: FxHashMap<(ArchetypeId, ComponentId), ArchetypeId>,
-    pub(crate) remove_edges: FxHashMap<(ArchetypeId, ComponentId), ArchetypeId>,
     pub(crate) entities: Entities,
     pub(crate) resources: Vec<Box<dyn core::any::Any + Send + Sync>>,
     pub(crate) resource_index: FxHashMap<core::any::TypeId, crate::ResourceId>,
@@ -76,6 +74,8 @@ pub struct World {
     pub(crate) bundles: Vec<BundleDesc>,
     pub(crate) bundle_by_type: FxHashMap<TypeId, BundleId>,
     pub(crate) archetype_version: u64,
+    pub(crate) add_edges: Vec<u32>,
+    pub(crate) remove_edges: Vec<u32>,
 }
 
 impl World {
@@ -88,8 +88,6 @@ impl World {
             component_factories: Vec::new(),
             archetypes: Vec::new(),
             archetype_index: FxHashMap::default(),
-            add_edges: FxHashMap::default(),
-            remove_edges: FxHashMap::default(),
             entities: Entities::new(),
             resources: Vec::new(),
             resource_index: FxHashMap::default(),
@@ -98,10 +96,34 @@ impl World {
             bundles: Vec::new(),
             bundle_by_type: FxHashMap::default(),
             archetype_version: 0,
+            add_edges: Vec::new(),
+            remove_edges: Vec::new(),
         };
         world.empty_archetype =
             world.find_or_create_archetype(ComponentMask::EMPTY);
         world
+    }
+
+    /// Reserves capacity for at least `additional` more entities in the
+    /// entity table.
+    ///
+    /// Does not pre-grow any archetype; combine with
+    /// [`Self::reserve_archetype`] when the target archetype is known.
+    pub fn reserve_entities(&mut self, additional: u32) {
+        self.entities.reserve(additional);
+    }
+
+    /// Reserves capacity for at least `additional` more rows in `archetype`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `archetype` was not produced by this world.
+    pub fn reserve_archetype(
+        &mut self,
+        archetype: ArchetypeId,
+        additional: u32,
+    ) {
+        self.archetypes[archetype_index(archetype)].reserve(additional);
     }
 
     /// Clears the query cache. Called whenever a new archetype is created.

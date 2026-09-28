@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::archetype::Archetype;
-use crate::{ArchetypeId, ComponentId, ComponentMask};
+use crate::{ArchetypeId, ComponentId, ComponentMask, MAX_COMPONENTS};
 
 use super::{QueryKey, World, archetype_index};
 
@@ -36,6 +36,11 @@ impl World {
         let arch = Archetype::new(id, mask, components, storages);
         self.archetypes.push(arch);
         self.archetype_index.insert(mask, id);
+        // Extend both adjacency tables by one row (MAX_COMPONENTS entries).
+        self.add_edges
+            .resize(self.add_edges.len() + MAX_COMPONENTS, 0);
+        self.remove_edges
+            .resize(self.remove_edges.len() + MAX_COMPONENTS, 0);
         self.archetype_version = self.archetype_version.wrapping_add(1);
         self.invalidate_query_cache();
 
@@ -48,13 +53,25 @@ impl World {
         from: ArchetypeId,
         comp: ComponentId,
     ) -> ArchetypeId {
-        if let Some(&to) = self.add_edges.get(&(from, comp)) {
-            return to;
+        let from_idx = archetype_index(from);
+        let comp_idx = comp.index();
+        debug_assert!(
+            comp_idx < MAX_COMPONENTS,
+            "ComponentId out of mask bounds"
+        );
+        let slot = from_idx * MAX_COMPONENTS + comp_idx;
+
+        let cached = self.add_edges[slot];
+        if cached != 0 {
+            return ArchetypeId::from_raw(cached);
         }
-        let mut target_mask = *self.archetypes[archetype_index(from)].mask();
+
+        let mut target_mask = *self.archetypes[from_idx].mask();
         target_mask.insert(comp);
         let to = self.find_or_create_archetype(target_mask);
-        self.add_edges.insert((from, comp), to);
+        // `find_or_create_archetype` may have resized the edge tables; the
+        // slot index is still valid because `from_idx` did not change.
+        self.add_edges[slot] = to.raw();
         to
     }
 
@@ -64,13 +81,23 @@ impl World {
         from: ArchetypeId,
         comp: ComponentId,
     ) -> ArchetypeId {
-        if let Some(&to) = self.remove_edges.get(&(from, comp)) {
-            return to;
+        let from_idx = archetype_index(from);
+        let comp_idx = comp.index();
+        debug_assert!(
+            comp_idx < MAX_COMPONENTS,
+            "ComponentId out of mask bounds"
+        );
+        let slot = from_idx * MAX_COMPONENTS + comp_idx;
+
+        let cached = self.remove_edges[slot];
+        if cached != 0 {
+            return ArchetypeId::from_raw(cached);
         }
-        let mut target_mask = *self.archetypes[archetype_index(from)].mask();
+
+        let mut target_mask = *self.archetypes[from_idx].mask();
         target_mask.remove(comp);
         let to = self.find_or_create_archetype(target_mask);
-        self.remove_edges.insert((from, comp), to);
+        self.remove_edges[slot] = to.raw();
         to
     }
 

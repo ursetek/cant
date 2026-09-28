@@ -246,4 +246,43 @@ impl Entities {
             Some(Entity::from_parts(i as u32, meta.generation))
         })
     }
+
+    /// Allocates a new entity and records its initial location in one write.
+    ///
+    /// Equivalent to [`Self::alloc`] followed by [`Self::set_location`], but
+    /// writes the metadata slot exactly once. Used by `World::spawn` and
+    /// `World::spawn_bundle_id`, where the target archetype and row are
+    /// known before the entity is allocated.
+    #[inline]
+    #[must_use]
+    pub(crate) fn alloc_with_location(&mut self, loc: Location) -> Entity {
+        let entity = if let Some(index) = self.free.pop() {
+            let meta = &mut self.meta[index as usize];
+            debug_assert!(
+                meta.location.is_none(),
+                "free-list slot points to a live entity",
+            );
+            meta.location = Some(loc);
+            Entity::from_parts(index, meta.generation)
+        } else {
+            let index =
+                u32::try_from(self.meta.len()).expect("entity index overflow");
+            self.meta.push(EntityMeta {
+                generation: 1,
+                location: Some(loc),
+            });
+            Entity::from_parts(index, 1)
+        };
+        self.live += 1;
+        entity
+    }
+
+    /// Reserves capacity for at least `additional` more entity slots.
+    ///
+    /// Does not touch `free`; the free list only shrinks with `free` calls
+    /// and its capacity is amortized separately.
+    #[inline]
+    pub fn reserve(&mut self, additional: u32) {
+        self.meta.reserve(additional as usize);
+    }
 }

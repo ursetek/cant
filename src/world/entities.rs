@@ -10,8 +10,23 @@ impl World {
     ///
     /// The entity lives in the empty archetype until components are added.
     pub fn spawn(&mut self) -> Entity {
-        let entity = self.entities.alloc();
-        self.spawn_reserved(entity);
+        let arch_id = self.empty_archetype;
+        let row = self.archetypes[archetype_index(arch_id)].len();
+        let entity = self.entities.alloc_with_location(Location {
+            archetype: arch_id,
+            row,
+        });
+
+        let arch = &mut self.archetypes[archetype_index(arch_id)];
+        arch.push_with(entity, |_, _| {});
+        debug_assert_eq!(
+            self.entities.location(entity),
+            Some(Location {
+                archetype: arch_id,
+                row
+            }),
+            "predicted row must match push_with's row",
+        );
         entity
     }
 

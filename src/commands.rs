@@ -262,7 +262,8 @@ impl Commands {
         (self.buffer, self.arena)
     }
 
-    /// Applies pre-split buffers sequentially.
+    /// Applies pre-split buffers sequentially, returning the cleared Vecs
+    /// for reuse.
     ///
     /// # Safety
     ///
@@ -270,14 +271,39 @@ impl Commands {
     /// whose bytes are now held by `arena`, with the same offsets.
     pub(crate) unsafe fn apply_parts(
         world: &mut World,
-        buffer: Vec<Command>,
-        arena: &Vec<u8>,
-    ) {
-        let arena = arena.as_slice();
-        for cmd in buffer {
+        mut buffer: Vec<Command>,
+        arena: Vec<u8>,
+    ) -> (Vec<Command>, Vec<u8>) {
+        let arena_ref = arena.as_slice();
+        // Drain consumes commands by value while keeping the Vec's backing
+        // storage intact for the caller to reuse.
+        for cmd in buffer.drain(..) {
             // SAFETY: caller guarantees each command's offsets index into
             // `arena`.
-            unsafe { apply_one(world, cmd, arena) };
+            unsafe { apply_one(world, cmd, arena_ref) };
+        }
+        (buffer, arena)
+    }
+
+    /// Constructs a `Commands` from already-owned buffers.
+    ///
+    /// Used by the scheduler's parallel path, which hands pooled buffers to
+    /// worker threads and reclaims them after applying.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::from_raw`].
+    pub(crate) unsafe fn from_parts(
+        world: *mut World,
+        buffer: Vec<Command>,
+        arena: Vec<u8>,
+        allows_spawn: bool,
+    ) -> Self {
+        Self {
+            world,
+            buffer,
+            arena,
+            allows_spawn,
         }
     }
 

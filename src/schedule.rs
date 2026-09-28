@@ -24,7 +24,7 @@ pub const DEFAULT_PARALLEL_THRESHOLD: usize = 32;
 /// A batch should only run in parallel when its summed hint amortizes that
 /// overhead with room to spare; a 30× ratio is a reasonable starting point.
 /// Systems whose total hint is below this budget run sequentially.
-pub const DEFAULT_PARALLEL_BUDGET_NS: u64 = 500_000;
+pub const DEFAULT_PARALLEL_BUDGET_NS: u64 = 1_000_000;
 
 /// Wrapper around a raw pointer that crosses thread boundaries inside rayon.
 ///
@@ -63,6 +63,7 @@ pub struct Schedule {
     parallel_threshold: usize,
     batch_costs_ns: Vec<u64>,
     parallel_budget_ns: u64,
+    parts_pool: Vec<(Vec<Command>, Vec<u8>)>,
 }
 
 impl Schedule {
@@ -76,6 +77,7 @@ impl Schedule {
             built: false,
             parallel_threshold: DEFAULT_PARALLEL_THRESHOLD,
             parallel_budget_ns: DEFAULT_PARALLEL_BUDGET_NS,
+            parts_pool: Vec::new(),
         }
     }
 
@@ -153,19 +155,24 @@ impl Schedule {
             self.build();
         }
 
+        // Take the loop inputs out of `self` so the parallel path can mutate
+        // `self.parts_pool` without fighting the borrow checker over
+        // disjoint fields.
+        let batches = std::mem::take(&mut self.batches);
+        let mut parts_pool = std::mem::take(&mut self.parts_pool);
+
         let systems_ptr: *mut Box<dyn System> = self.systems.as_mut_ptr();
         let systems_len = self.systems.len();
         let sys = SendPtr(systems_ptr);
         let raw = SendPtr(core::ptr::from_mut(world));
 
-        for (batch_idx, batch) in self.batches.iter().enumerate() {
+        for (batch_idx, batch) in batches.iter().enumerate() {
             if batch.is_empty() {
                 continue;
             }
 
+            // ---- Single-system batch: spawning permitted. ----
             if batch.len() == 1 {
-                // Single-system batch: spawning permitted. Always
-                // sequential.
                 let idx = batch[0];
                 debug_assert!(idx < systems_len);
                 // SAFETY: idx < systems_len.
@@ -180,9 +187,7 @@ impl Schedule {
                 continue;
             }
 
-            // Multi-system batch: systems are pairwise non-conflicting by
-            // construction, so no system here is a structural writer and
-            // spawning is disabled for all of them.
+            // ---- Multi-system batch: spawning disabled for all systems. ----
             let batch_cost = self.batch_costs_ns[batch_idx];
             let use_parallel = should_parallelize(
                 batch.len(),
@@ -192,6 +197,9 @@ impl Schedule {
             );
 
             if !use_parallel {
+                // Sequential fallback. Buffers are collected and applied
+                // together at the end of the batch to preserve the same
+                // visibility semantics as the parallel path.
                 let mut buffers: Vec<(Vec<Command>, Vec<u8>)> =
                     Vec::with_capacity(batch.len());
                 for &idx in batch {
@@ -208,39 +216,51 @@ impl Schedule {
                 }
                 for (buffer, arena) in buffers {
                     // SAFETY: buffers were produced against this world.
-                    unsafe {
-                        Commands::apply_parts(&mut *raw.get(), buffer, &arena);
-                    }
+                    let _ = unsafe {
+                        Commands::apply_parts(&mut *raw.get(), buffer, arena)
+                    };
                 }
                 continue;
             }
 
-            // Parallel path.
-            // SAFETY: indices in a batch are distinct; systems in a batch
-            // have non-conflicting access lists; spawning is disabled.
-            let buffers: Vec<(Vec<Command>, Vec<u8>)> = batch
-                .par_iter()
-                .map(|&idx| {
+            // ---- Parallel path. ----
+            let n = batch.len();
+            while parts_pool.len() < n {
+                parts_pool.push((Vec::new(), Vec::new()));
+            }
+            let mut slots: Vec<(Vec<Command>, Vec<u8>)> =
+                parts_pool.drain(..n).collect();
+
+            batch.par_iter().zip(slots.par_iter_mut()).for_each(
+                |(&idx, slot)| {
                     debug_assert!(idx < systems_len);
+                    let (buf, arena) = std::mem::take(slot);
                     // SAFETY: distinct index per task.
                     let system = unsafe { &mut *sys.get().add(idx) };
                     // SAFETY: no conflicting access across threads.
                     let cell = unsafe { UnsafeWorldCell::from_raw(raw.get()) };
-                    // SAFETY: spawning disabled.
-                    let mut commands =
-                        unsafe { Commands::from_raw(raw.get(), false) };
+                    // SAFETY: spawning disabled for multi-system batches.
+                    let mut commands = unsafe {
+                        Commands::from_parts(raw.get(), buf, arena, false)
+                    };
                     system.run(cell, &mut commands);
-                    commands.into_parts()
-                })
-                .collect();
+                    *slot = commands.into_parts();
+                },
+            );
 
-            for (buffer, arena) in buffers {
+            // Sequential apply in batch order; each pair returns to the
+            // pool with its capacity intact.
+            for (buffer, arena) in slots.drain(..) {
                 // SAFETY: buffers were produced against this world.
-                unsafe {
-                    Commands::apply_parts(&mut *raw.get(), buffer, &arena);
-                }
+                let (buffer, arena) = unsafe {
+                    Commands::apply_parts(&mut *raw.get(), buffer, arena)
+                };
+                parts_pool.push((buffer, arena));
             }
         }
+
+        self.batches = batches;
+        self.parts_pool = parts_pool;
     }
 
     /// Number of systems in the schedule.
